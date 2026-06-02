@@ -63,3 +63,9 @@ export const colorFromName = (name) => {
   const hue = Math.abs(hash) % 360
   return `hsl(${hue}, 55%, 55%)`
 }
+
+// 派发数据变更事件（SyncManager 监听后会立即同步）
+export const emitDataUpdated = (entityType) => {
+  if (typeof window === 'undefined') return
+  window.dispatchEvent(new CustomEvent('data-updated', { detail: { entityType } }))
+}

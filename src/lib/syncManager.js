@@ -1,0 +1,369 @@
+/**
+ * SyncManager —— 同步核心
+ * 严格按 PRD §5 实现，可注入 db/supabase/deviceId/clock 用于测试
+ *
+ * 主要改造（相对 PRD 模板）：
+ * 1. 构造函数接受所有依赖，便于测试
+ * 2. LWW 严格按 PRD 5.3（version → updated_at → device_id）
+ * 3. note_tags 复合主键 onConflict: 'note_id,tag_id'
+ * 4. Realtime 订阅加 user_id 过滤
+ * 5. window.dispatchEvent('data-updated') 触发 UI 刷新
+ * 6. online 事件触发全量同步 + 重置退避
+ * 7. visibilitychange 触发全量同步
+ * 8. 指数退避 1s→2s→4s→...→32s
+ * 9. 批量 100 条
+ * 10. 'data-updated' 事件触发即时同步（debounced 1s）
+ */
+import { v4 as uuidv4 } from 'uuid'
+import { pickWinner } from './conflict'
+
+const ENTITIES = ['notes', 'tags', 'note_tags']
+
+const pkOf = (entity, row) => {
+  if (entity === 'note_tags') return [row.note_id, row.tag_id]
+  return row.id
+}
+
+const nowIso = (clock) => new Date(clock()).toISOString()
+
+export class SyncManager {
+  constructor({
+    db,
+    supabase,
+    deviceId,
+    clock = () => Date.now(),
+    onLocalChange = null,
+    onSyncStateChange = null,
+    onConflict = null,
+  }) {
+    this.db = db
+    this.supabase = supabase
+    this.deviceId = deviceId
+    this.clock = clock
+    this.onLocalChange = onLocalChange
+    this.onSyncStateChange = onSyncStateChange
+    this.onConflict = onConflict
+    this.isSyncing = false
+    this.realtimeChannel = null
+    this.pollingInterval = null
+    this.retryDelay = 1000
+    this.maxRetryDelay = 32000
+    this.batchSize = 100
+    this.userId = null
+    this._retryTimer = null
+    this._reconnectTimer = null
+    this._onOnline = null
+    this._onOffline = null
+    this._onVisibility = null
+    this._onDataUpdated = null
+    this._immediateSyncTimer = null
+  }
+
+  async start() {
+    const u = await this.supabase.auth.getUser()
+    const user = u?.data?.user
+    if (!user) return false
+    this.userId = user.id
+    await this.fullSync()
+    this.setupRealtime()
+    this.startPolling()
+    this.setupListeners()
+    return true
+  }
+
+  async stop() {
+    if (this.realtimeChannel) {
+      this.supabase.removeChannel(this.realtimeChannel)
+      this.realtimeChannel = null
+    }
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval)
+      this.pollingInterval = null
+    }
+    this.removeListeners()
+    if (this._retryTimer) clearTimeout(this._retryTimer)
+    if (this._reconnectTimer) clearTimeout(this._reconnectTimer)
+    if (this._immediateSyncTimer) clearTimeout(this._immediateSyncTimer)
+  }
+
+  // ─── 全量增量同步 ───────────────────────────────────────────────────
+  async fullSync() {
+    if (this.isSyncing) return
+    if (!this.userId) {
+      const u = await this.supabase.auth.getUser()
+      const user = u?.data?.user
+      if (!user) return
+      this.userId = user.id
+    }
+    this.isSyncing = true
+    this._setState({ status: 'syncing' })
+    try {
+      for (const entity of ENTITIES) {
+        await this._syncEntity(entity)
+      }
+      this.retryDelay = 1000
+      this._setState({ status: 'idle', lastSyncAt: this.clock() })
+    } catch (err) {
+      this._setState({ status: 'error', error: err.message })
+      this.scheduleRetry()
+    } finally {
+      this.isSyncing = false
+    }
+  }
+
+  async _syncEntity(entity) {
+    const lastKey = `last_${entity}_sync_at`
+    const meta = await this.db.sync_metadata.get(lastKey)
+    const lastSyncAt = meta?.value || '1970-01-01T00:00:00.000Z'
+
+    // 1. 拉云端增量
+    const { data: cloudRows, error } = await this.supabase
+      .from(entity)
+      .select('*')
+      .gt('updated_at', lastSyncAt)
+      .order('updated_at', { ascending: true })
+
+    if (error) throw error
+
+    if (cloudRows && cloudRows.length > 0) {
+      const ts = nowIso(this.clock)
+      await this.db.transaction('rw', this.db[entity], async () => {
+        for (const cloudRow of cloudRows) {
+          const localRow = stripUserId(cloudRow)
+          const pk = pkOf(entity, localRow)
+          const existing = await this.db[entity].get(pk)
+          if (!existing) {
+            await this.db[entity].put({
+              ...localRow,
+              sync_status: 'synced',
+              last_synced_at: ts,
+            })
+          } else if (localRow.version > existing.version) {
+            await this.db[entity].put({
+              ...localRow,
+              sync_status: 'synced',
+              last_synced_at: ts,
+            })
+          } else if (localRow.version === existing.version && existing.sync_status === 'pending') {
+            await this._handleConflict(entity, existing, cloudRow)
+          }
+          // 同 version 已同步：跳过；本地 version 更高：本地胜，留待推送
+        }
+      })
+      const maxUpdatedAt = cloudRows
+        .map((r) => r.updated_at)
+        .reduce((m, t) => (t > m ? t : m), lastSyncAt)
+      await this.db.sync_metadata.put({ key: lastKey, value: maxUpdatedAt })
+    }
+
+    // 2. 推送本地待同步
+    await this._pushLocalChanges(entity)
+  }
+
+  // ─── 推送本地变更 ───────────────────────────────────────────────────
+  async _pushLocalChanges(entity) {
+    const table = this.db[entity]
+    const pending = await table
+      .filter((row) => row.sync_status === 'pending' || row.sync_status === 'failed')
+      .limit(this.batchSize)
+      .toArray()
+
+    if (pending.length === 0) return
+
+    const items = pending.map((row) => ({
+      ...row,
+      user_id: this.userId,
+      last_sync_device: row.last_sync_device || this.deviceId,
+    }))
+
+    const onConflict = entity === 'note_tags' ? 'note_id,tag_id' : 'id'
+    const { error } = await this.supabase
+      .from(entity)
+      .upsert(items, { onConflict })
+
+    if (error) throw error
+
+    const ts = nowIso(this.clock)
+    await this.db.transaction('rw', table, async () => {
+      for (const row of pending) {
+        const pk = pkOf(entity, row)
+        const existing = await table.get(pk)
+        if (existing) {
+          await table.put({ ...existing, sync_status: 'synced', last_synced_at: ts })
+        }
+      }
+    })
+
+    // 把对应的 sync_queue 条目标记为 done
+    const queueItems = await this.db.sync_queue
+      .where('entity_type')
+      .equals(entity)
+      .and((q) => q.status === 'pending')
+      .toArray()
+    for (const q of queueItems) {
+      await this.db.sync_queue.update(q.id, { status: 'done' })
+    }
+  }
+
+  // ─── 冲突处理 ───────────────────────────────────────────────────────
+  async _handleConflict(entity, local, cloud) {
+    const winner = pickWinner(local, cloud)
+    const conflictId = uuidv4()
+    const pk = pkOf(entity, local)
+    await this.db.conflicts.add({
+      id: conflictId,
+      entity_type: entity,
+      entity_id: typeof pk === 'object' ? `${pk[0]}:${pk[1]}` : pk,
+      local_data: local,
+      cloud_data: cloud,
+      created_at: nowIso(this.clock),
+    })
+    this.onConflict?.({ entityType: entity, local, cloud, winner, conflictId })
+    if (winner === cloud) {
+      const localCloud = stripUserId(cloud)
+      await this.db[entity].put({
+        ...localCloud,
+        sync_status: 'synced',
+        last_synced_at: nowIso(this.clock),
+      })
+    }
+  }
+
+  // ─── Realtime ───────────────────────────────────────────────────────
+  setupRealtime() {
+    if (this.realtimeChannel) return
+    const ch = this.supabase
+      .channel('ffn-changes')
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'notes', filter: `user_id=eq.${this.userId}` },
+        (p) => this._handleRealtimeChange('notes', p),
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'tags', filter: `user_id=eq.${this.userId}` },
+        (p) => this._handleRealtimeChange('tags', p),
+      )
+      .on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'note_tags', filter: `user_id=eq.${this.userId}` },
+        (p) => this._handleRealtimeChange('note_tags', p),
+      )
+      .subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT' || status === 'CLOSED') {
+          this.scheduleRealtimeReconnect()
+        }
+      })
+    this.realtimeChannel = ch
+  }
+
+  async _handleRealtimeChange(entity, payload) {
+    const { eventType, new: newRow, old: oldRow } = payload
+    if (newRow?.last_sync_device === this.deviceId) return
+
+    const ts = nowIso(this.clock)
+    await this.db.transaction('rw', this.db[entity], async () => {
+      if (eventType === 'DELETE') {
+        const pk = pkOf(entity, oldRow)
+        const existing = await this.db[entity].get(pk)
+        if (existing && existing.sync_status === 'pending') return
+        await this.db[entity].delete(pk)
+      } else {
+        const localRow = stripUserId(newRow)
+        const pk = pkOf(entity, localRow)
+        const existing = await this.db[entity].get(pk)
+        if (!existing) {
+          await this.db[entity].put({ ...localRow, sync_status: 'synced', last_synced_at: ts })
+        } else if (localRow.version > existing.version) {
+          if (existing.sync_status === 'pending') {
+            await this._handleConflict(entity, existing, newRow)
+          } else {
+            await this.db[entity].put({ ...localRow, sync_status: 'synced', last_synced_at: ts })
+          }
+        }
+        // 同/低 version：跳过
+      }
+    })
+
+    this.onLocalChange?.(entity)
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('data-updated', { detail: { entityType: entity } }))
+    }
+  }
+
+  scheduleRealtimeReconnect() {
+    if (this._reconnectTimer) return
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null
+      this.setupRealtime()
+    }, this.retryDelay)
+    this.retryDelay = Math.min(this.retryDelay * 2, this.maxRetryDelay)
+  }
+
+  // ─── 轮询 + 监听 ───────────────────────────────────────────────────
+  startPolling() {
+    if (this.pollingInterval) return
+    this.pollingInterval = setInterval(() => {
+      if (this.isSyncing) return
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return
+      if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return
+      this.fullSync()
+    }, 30000)
+  }
+
+  setupListeners() {
+    if (typeof window === 'undefined') return
+    this._onOnline = () => {
+      this.retryDelay = 1000
+      this.batchSize = 100
+      this.fullSync()
+    }
+    this._onOffline = () => {
+      this.batchSize = 20
+      this._setState({ status: 'offline' })
+    }
+    this._onVisibility = () => {
+      if (document.visibilityState === 'visible') this.fullSync()
+    }
+    this._onDataUpdated = () => {
+      // 1s debounce：合并密集写入
+      if (this._immediateSyncTimer) clearTimeout(this._immediateSyncTimer)
+      this._immediateSyncTimer = setTimeout(() => {
+        this._immediateSyncTimer = null
+        if (!this.isSyncing) this.fullSync()
+      }, 1000)
+    }
+    window.addEventListener('online', this._onOnline)
+    window.addEventListener('offline', this._onOffline)
+    document.addEventListener('visibilitychange', this._onVisibility)
+    window.addEventListener('data-updated', this._onDataUpdated)
+  }
+
+  removeListeners() {
+    if (typeof window === 'undefined') return
+    if (this._onOnline) window.removeEventListener('online', this._onOnline)
+    if (this._onOffline) window.removeEventListener('offline', this._onOffline)
+    if (this._onDataUpdated) window.removeEventListener('data-updated', this._onDataUpdated)
+    if (this._onVisibility) document.removeEventListener('visibilitychange', this._onVisibility)
+  }
+
+  scheduleRetry() {
+    if (this._retryTimer) return
+    this._retryTimer = setTimeout(() => {
+      this._retryTimer = null
+      this.fullSync()
+    }, this.retryDelay)
+    this.retryDelay = Math.min(this.retryDelay * 2, this.maxRetryDelay)
+  }
+
+  _setState(partial) {
+    this.onSyncStateChange?.(partial)
+  }
+}
+
+const stripUserId = (row) => {
+  const { user_id, ...rest } = row
+  return rest
+}
+
+export const createSyncManager = (deps) => new SyncManager(deps)

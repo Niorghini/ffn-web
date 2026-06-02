@@ -8,6 +8,7 @@
  */
 import { v4 as uuidv4 } from 'uuid'
 import { db, nowIso } from '@/lib/db'
+import { emitDataUpdated } from '@/lib/tags'
 import { noteTagsRepo } from './noteTagsRepo'
 
 const PRIORITY = { create: 1, restore: 3, update: 5, delete: 8 }
@@ -58,6 +59,7 @@ export const notesRepo = {
         await enqueueTagAttach(id, tagId)
       }
     })
+    emitDataUpdated('notes')
     return note
   },
 
@@ -81,6 +83,7 @@ export const notesRepo = {
       await db.notes.put(updated)
       await enqueue('update', id)
     })
+    emitDataUpdated('notes')
     return updated
   },
 
@@ -111,6 +114,7 @@ export const notesRepo = {
       await db.notes.put(updated)
       await enqueue('update', id)
     })
+    emitDataUpdated('notes')
     return updated
   },
 
@@ -137,6 +141,7 @@ export const notesRepo = {
       await db.notes.put(updated)
       await enqueue('delete', id)
     })
+    emitDataUpdated('notes')
     return updated
   },
 
@@ -163,6 +168,7 @@ export const notesRepo = {
       await db.notes.put(updated)
       await enqueue('restore', id)
     })
+    emitDataUpdated('notes')
     return updated
   },
 
@@ -191,6 +197,7 @@ export const notesRepo = {
       await db.notes.put(updated)
       await enqueue('update', id)
     })
+    emitDataUpdated('notes')
     return updated
   },
 

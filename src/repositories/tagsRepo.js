@@ -6,7 +6,7 @@
  */
 import { v4 as uuidv4 } from 'uuid'
 import { db, nowIso } from '@/lib/db'
-import { colorFromName } from '@/lib/tags'
+import { colorFromName, emitDataUpdated } from '@/lib/tags'
 
 const enqueue = (type, tagId) =>
   db.sync_queue.add({
@@ -69,6 +69,7 @@ export const tagsRepo = {
         result.push(tag)
       }
     })
+    if (toCreate.length > 0) emitDataUpdated('tags')
     return result
   },
 
@@ -113,6 +114,7 @@ export const tagsRepo = {
       await db.tags.put(updated)
       await enqueue('update', id)
     })
+    emitDataUpdated('tags')
     return updated
   },
 
@@ -136,6 +138,7 @@ export const tagsRepo = {
       await db.tags.put(updated)
       await enqueue('update', id)
     })
+    emitDataUpdated('tags')
     return updated
   },
 
@@ -251,6 +254,7 @@ export const tagsRepo = {
       await db.tags.put(updated)
       await enqueue('delete', sourceId)
     })
+    emitDataUpdated('tags')
     return { source, target }
   },
 

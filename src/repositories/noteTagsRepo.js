@@ -4,6 +4,7 @@
  * - attach / detach / replaceAll 都包在事务里，同步入队 sync_queue
  */
 import { db, nowIso } from '@/lib/db'
+import { emitDataUpdated } from '@/lib/tags'
 
 const enqueueAttach = (noteId, tagId) =>
   db.sync_queue.add({
@@ -52,6 +53,7 @@ export const noteTagsRepo = {
         attached.push(tagId)
       }
     })
+    if (attached.length > 0) emitDataUpdated('note_tags')
     return attached
   },
 
@@ -76,6 +78,7 @@ export const noteTagsRepo = {
         detached.push(tagId)
       }
     })
+    if (detached.length > 0) emitDataUpdated('note_tags')
     return detached
   },
 
@@ -86,6 +89,7 @@ export const noteTagsRepo = {
   async replaceAll(noteId, tagIds) {
     const ts = nowIso()
     const desired = new Set(tagIds)
+    let changes = 0
     await db.transaction('rw', db.note_tags, db.sync_queue, async () => {
       const existing = await db.note_tags.where('note_id').equals(noteId).toArray()
       const current = new Set(existing.filter((e) => !e.deleted_at).map((e) => e.tag_id))
@@ -102,6 +106,7 @@ export const noteTagsRepo = {
           last_synced_at: null,
         })
         await enqueueAttach(noteId, tagId)
+        changes++
       }
       for (const tagId of toRemove) {
         const row = existing.find((e) => e.tag_id === tagId)
@@ -113,8 +118,10 @@ export const noteTagsRepo = {
           sync_status: 'pending',
         })
         await enqueueDetach(noteId, tagId)
+        changes++
       }
     })
+    if (changes > 0) emitDataUpdated('note_tags')
   },
 
   async getByNote(noteId) {
