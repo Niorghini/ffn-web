@@ -9,6 +9,7 @@ import { notesRepo } from '@/repositories/notesRepo'
 export const useNotesStore = create((set, get) => ({
   notes: [],
   loaded: false,
+  activeId: null, // 选中的笔记 id（编辑右栏用）
   activeTagId: null, // null = 全部
   statusFilter: 'all', // all | pending | completed
   searchQuery: '',
@@ -23,6 +24,8 @@ export const useNotesStore = create((set, get) => ({
     }
     set({ notes, loaded: true })
   },
+
+  setActiveId: (id) => set({ activeId: id }),
 
   setActiveTagId: (id) => {
     set({ activeTagId: id, loaded: false })
