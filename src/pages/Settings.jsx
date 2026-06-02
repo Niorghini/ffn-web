@@ -4,9 +4,11 @@
  */
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowLeft, RefreshCw, LogOut, Eraser } from 'lucide-react'
+import { ArrowLeft, RefreshCw, LogOut, Eraser, RotateCcw } from 'lucide-react'
 import { getArchiveAfterDays, setArchiveAfterDays, runArchive } from '@/lib/autoArchive'
 import { tagsRepo } from '@/repositories/tagsRepo'
+import { notesRepo } from '@/repositories/notesRepo'
+import { fullReset } from '@/lib/factoryReset'
 import { useAuthStore } from '@/stores/useAuthStore'
 import { getSyncManager } from '@/lib/syncInstance'
 import { useSyncStore } from '@/stores/useSyncStore'
@@ -26,6 +28,7 @@ const Settings = () => {
   const [stats, setStats] = useState(null)
   const [cleaning, setCleaning] = useState(false)
   const [cleanedMsg, setCleanedMsg] = useState('')
+  const [resetting, setResetting] = useState(false)
 
   const refreshUnused = async () => {
     const u = await tagsRepo.findUnused()
@@ -102,6 +105,26 @@ const Settings = () => {
       alert('清理失败：' + e.message)
     } finally {
       setCleaning(false)
+    }
+  }
+
+  const handleFactoryReset = async () => {
+    if (resetting) return
+    const c1 = confirm('⚠ 真的要清空所有数据吗？\n\n这会删除：所有笔记、所有标签、note_tags 链接、同步队列、冲突记录。\n\n保留：你的登录账号。\n\n不可恢复。继续？')
+    if (!c1) return
+    const c2 = confirm('再次确认：本地 IndexedDB 和云端 Supabase 的所有数据都会被删除。\n\n这一步是最后的检查。继续？')
+    if (!c2) return
+    setResetting(true)
+    try {
+      const result = await fullReset()
+      const cloud = result.cloud?.skipped
+        ? '（未登录，跳过云端）'
+        : `笔记 ${result.cloud.notes} / 标签 ${result.cloud.tags} / 链接 ${result.cloud.note_tags}`
+      alert(`重置完成！\n\n本地：${result.localStores} 个 store 已清空\n云端：${cloud}\n\n页面将刷新。`)
+      window.location.reload()
+    } catch (e) {
+      alert('重置失败：' + e.message)
+      setResetting(false)
     }
   }
 
@@ -253,13 +276,23 @@ const Settings = () => {
 
         <section className="bg-white rounded-lg shadow-sm p-4">
           <h2 className="text-sm font-medium text-red-600 mb-3">危险操作</h2>
-          <button
-            onClick={signOut}
-            className="text-sm px-3 py-1.5 border border-red-500 text-red-600 rounded-lg hover:bg-red-50 flex items-center gap-1.5 transition-colors"
-          >
-            <LogOut size={14} />
-            退出登录
-          </button>
+          <div className="space-y-2">
+            <button
+              onClick={signOut}
+              className="text-sm px-3 py-1.5 border border-red-500 text-red-600 rounded-lg hover:bg-red-50 flex items-center gap-1.5 transition-colors"
+            >
+              <LogOut size={14} />
+              退出登录
+            </button>
+            <button
+              onClick={handleFactoryReset}
+              disabled={resetting}
+              className="w-full text-sm px-3 py-1.5 border-2 border-red-600 bg-red-50 text-red-700 rounded-lg hover:bg-red-100 disabled:opacity-50 flex items-center gap-1.5 justify-center transition-colors"
+            >
+              <RotateCcw size={14} />
+              {resetting ? '重置中...' : '清空所有数据（本地 + 云端，保留账号）'}
+            </button>
+          </div>
         </section>
 
         <div className="text-center text-xs text-gray-400 pt-2">发法牛 v1.2</div>
