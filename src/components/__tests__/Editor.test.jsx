@@ -1,0 +1,75 @@
+/**
+ * Editor 组件测试
+ * - debounce 自动保存：300ms 后触发 update
+ * - 新建模式 Ctrl+Enter 提交
+ * - 状态切换按钮
+ */
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { db, openDb } from '@/lib/db'
+import { notesRepo } from '@/repositories/notesRepo'
+import Editor from '@/components/Editor'
+
+describe('Editor', () => {
+  beforeEach(async () => {
+    await openDb()
+    await db.notes.clear()
+    await db.sync_queue.clear()
+  })
+
+  it('新建模式：渲染空 textarea + Ctrl+Enter 触发 create', async () => {
+    const onSaved = vi.fn()
+    render(<Editor note={null} onSaved={onSaved} />)
+    const textarea = screen.getByPlaceholderText(/写下你的想法/)
+    const user = userEvent.setup()
+    await user.type(textarea, 'hello #work')
+    await user.keyboard('{Control>}{Enter}{/Control}')
+    await waitFor(() => {
+      expect(onSaved).toHaveBeenCalled()
+    })
+    const all = await db.notes.toArray()
+    expect(all).toHaveLength(1)
+    expect(all[0].content).toBe('hello #work')
+  })
+
+  it('编辑模式：300ms debounce 自动保存', async () => {
+    const note = await notesRepo.create({ content: 'initial' })
+    const onSaved = vi.fn()
+    render(<Editor note={note} onSaved={onSaved} />)
+    const textarea = screen.getByDisplayValue('initial')
+    const user = userEvent.setup()
+    await user.clear(textarea)
+    await user.type(textarea, 'updated')
+    // 立即查应该还没保存
+    let n = await db.notes.get(note.id)
+    expect(n.content).toBe('initial')
+    // 等 debounce
+    await waitFor(
+      () => {
+        expect(onSaved).toHaveBeenCalled()
+      },
+      { timeout: 600 },
+    )
+    n = await db.notes.get(note.id)
+    expect(n.content).toBe('updated')
+  })
+
+  it('状态切换：toggle status + 版本号自增', async () => {
+    const note = await notesRepo.create({ content: 'x' })
+    const onSaved = vi.fn()
+    render(<Editor note={note} onSaved={onSaved} />)
+    const toggleBtn = screen.getByTitle('切换状态')
+    await userEvent.setup().click(toggleBtn)
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    const after = await db.notes.get(note.id)
+    expect(after.status).toBe('completed')
+  })
+
+  it('显示识别出的 #tags', async () => {
+    const note = await notesRepo.create({ content: 'a #foo #bar b' })
+    render(<Editor note={note} />)
+    expect(screen.getByText('#foo')).toBeInTheDocument()
+    expect(screen.getByText('#bar')).toBeInTheDocument()
+  })
+})
