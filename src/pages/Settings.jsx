@@ -22,13 +22,21 @@ const Settings = () => {
   const { lastSyncAt } = useSyncStore()
   const [days, setDays] = useState(30)
   const [saved, setSaved] = useState(false)
-  const [unusedCount, setUnusedCount] = useState(null)
+  const [unused, setUnused] = useState(null) // null = 加载中, [] = 没有
   const [cleaning, setCleaning] = useState(false)
   const [cleanedMsg, setCleanedMsg] = useState('')
 
+  const refreshUnused = async () => {
+    const u = await tagsRepo.findUnused()
+    setUnused(u)
+  }
+
   useEffect(() => {
     getArchiveAfterDays().then(setDays)
-    tagsRepo.findUnused().then((u) => setUnusedCount(u.length))
+    refreshUnused()
+    const onUpdate = () => refreshUnused()
+    window.addEventListener('data-updated', onUpdate)
+    return () => window.removeEventListener('data-updated', onUpdate)
   }, [])
 
   const handleChange = async (v) => {
@@ -49,19 +57,19 @@ const Settings = () => {
 
   const handleHardDeleteUnused = async () => {
     if (cleaning) return
-    if (unusedCount === 0) {
+    if (!unused || unused.length === 0) {
       alert('没有未使用的标签')
       return
     }
-    if (!confirm(`将物理删除 ${unusedCount} 个未使用的标签（本地 + 云端）。\n此操作不可恢复，继续？`)) {
+    if (!confirm(`将物理删除 ${unused.length} 个未使用的标签（本地 + 云端）。\n此操作不可恢复，继续？`)) {
       return
     }
     setCleaning(true)
     try {
       const count = await tagsRepo.hardDeleteUnused()
-      setUnusedCount(0)
       setCleanedMsg(`已删除 ${count} 个未用标签`)
       setTimeout(() => setCleanedMsg(''), 3000)
+      await refreshUnused()
     } catch (e) {
       alert('删除失败：' + e.message)
     } finally {
@@ -135,16 +143,36 @@ const Settings = () => {
             <div className="pt-2 border-t border-gray-100">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm text-gray-700">未使用标签</span>
-                <span className="text-xs text-gray-400">
-                  {unusedCount === null ? '加载中...' : `${unusedCount} 个`}
-                </span>
+                <button
+                  onClick={refreshUnused}
+                  className="text-xs text-[#0077B6] hover:underline"
+                  title="重新计算"
+                >
+                  {unused === null ? '加载中...' : `刷新 · ${unused.length} 个`}
+                </button>
               </div>
               <p className="text-xs text-gray-500 mb-2">
-                没有任何笔记引用的标签。会从本地和云端同时删除。
+                没有任何活跃笔记链接的标签（包括软删）。会从本地和云端同时删除。
               </p>
+              {unused && unused.length > 0 && (
+                <ul className="mb-3 space-y-1 max-h-40 overflow-y-auto bg-bg-main rounded p-2">
+                  {unused.map((t) => (
+                    <li key={t.id} className="flex items-center gap-2 text-xs">
+                      <span
+                        className="inline-block w-2.5 h-2.5 rounded-sm shrink-0"
+                        style={{ background: t.color || '#9CA3AF' }}
+                      />
+                      <span className="text-gray-700 flex-1 truncate">#{t.name}</span>
+                      {t.deleted_at && (
+                        <span className="text-[10px] text-gray-400">已软删</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
               <button
                 onClick={handleHardDeleteUnused}
-                disabled={cleaning || unusedCount === 0}
+                disabled={cleaning || !unused || unused.length === 0}
                 className="text-xs px-3 py-1.5 border border-red-500 text-red-600 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 transition-colors"
               >
                 <Eraser size={12} />
