@@ -118,4 +118,83 @@ describe('notesRepo', () => {
     await notesRepo.softDelete(note.id)
     await expect(notesRepo.update(note.id, { content: 'y' })).rejects.toThrow()
   })
+
+  // ── softDelete 同步处理 note_tags ────────────────────────────────
+  it('softDelete 同步软删该笔记的活跃 note_tags 链接', async () => {
+    const note = await notesRepo.create({ content: '#a #b', tagIds: ['t1', 't2'] })
+    const before = await db.note_tags.where('note_id').equals(note.id).toArray()
+    expect(before.every((l) => !l.deleted_at)).toBe(true)
+    await notesRepo.softDelete(note.id)
+    const after = await db.note_tags.where('note_id').equals(note.id).toArray()
+    expect(after.every((l) => !!l.deleted_at)).toBe(true)
+  })
+
+  it('restore 同步复活被 softDelete 软删的 link', async () => {
+    const note = await notesRepo.create({ content: 'x', tagIds: ['t1'] })
+    await notesRepo.softDelete(note.id)
+    const during = await db.note_tags.where('note_id').equals(note.id).toArray()
+    expect(during[0].deleted_at).toBeTruthy()
+    await notesRepo.restore(note.id)
+    const after = await db.note_tags.where('note_id').equals(note.id).toArray()
+    expect(after[0].deleted_at).toBeNull()
+  })
+
+  // ── hardDelete 物理删 ───────────────────────────────────────────
+  it('hardDelete 物理删 note + 删它的所有 note_tags 链接', async () => {
+    const note = await notesRepo.create({ content: 'x', tagIds: ['t1', 't2'] })
+    expect(await db.notes.get(note.id)).toBeTruthy()
+    expect(await db.note_tags.where('note_id').equals(note.id).count()).toBe(2)
+    await notesRepo.hardDelete(note.id)
+    expect(await db.notes.get(note.id)).toBeUndefined()
+    expect(await db.note_tags.where('note_id').equals(note.id).count()).toBe(0)
+  })
+
+  it('hardDelete 清残留 sync_queue entries', async () => {
+    const note = await notesRepo.create({ content: 'x' })
+    const before = await db.sync_queue.where('entity_id').equals(note.id).toArray()
+    expect(before.length).toBeGreaterThan(0)
+    await notesRepo.hardDelete(note.id)
+    const after = await db.sync_queue.where('entity_id').equals(note.id).toArray()
+    expect(after).toHaveLength(0)
+  })
+
+  it('hardDelete 不存在的 id no-op', async () => {
+    await expect(notesRepo.hardDelete('nope')).resolves.toBeUndefined()
+  })
+
+  // ── cleanOrphanNoteTags ─────────────────────────────────────────
+  it('cleanOrphanNoteTags 删指向不存在笔记的 link', async () => {
+    const note = await notesRepo.create({ content: 'x', tagIds: ['t1'] })
+    // 手动塞一个 orphan
+    await db.note_tags.add({ note_id: 'orphan-note', tag_id: 't1', created_at: '2026-01-01', version: 1, sync_status: 'pending' })
+    const count = await notesRepo.cleanOrphanNoteTags()
+    expect(count).toBe(1)
+    expect(await db.note_tags.get(['orphan-note', 't1'])).toBeUndefined()
+    expect(await db.note_tags.get([note.id, 't1'])).toBeTruthy()
+  })
+
+  it('cleanOrphanNoteTags 无 orphan 返回 0', async () => {
+    const note = await notesRepo.create({ content: 'x', tagIds: ['t1'] })
+    const count = await notesRepo.cleanOrphanNoteTags()
+    expect(count).toBe(0)
+  })
+
+  // ── getStats ────────────────────────────────────────────────────
+  it('getStats 返回准确的 active/deleted/total 计数', async () => {
+    const a = await notesRepo.create({ content: 'a' })
+    const b = await notesRepo.create({ content: 'b' })
+    const c = await notesRepo.create({ content: 'c' })
+    await notesRepo.softDelete(c.id)
+    const s = await notesRepo.getStats()
+    expect(s.notes.total).toBe(3)
+    expect(s.notes.active).toBe(2)
+    expect(s.notes.deleted).toBe(1)
+  })
+
+  it('getStats 算 orphan note_tags', async () => {
+    await notesRepo.create({ content: 'x' })
+    await db.note_tags.add({ note_id: 'orphan', tag_id: 't1', created_at: '2026-01-01', version: 1, sync_status: 'pending' })
+    const s = await notesRepo.getStats()
+    expect(s.noteTags.orphan).toBe(1)
+  })
 })

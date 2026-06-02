@@ -23,6 +23,7 @@ const Settings = () => {
   const [days, setDays] = useState(30)
   const [saved, setSaved] = useState(false)
   const [unused, setUnused] = useState(null) // null = 加载中, [] = 没有
+  const [stats, setStats] = useState(null)
   const [cleaning, setCleaning] = useState(false)
   const [cleanedMsg, setCleanedMsg] = useState('')
 
@@ -31,10 +32,19 @@ const Settings = () => {
     setUnused(u)
   }
 
+  const refreshStats = async () => {
+    const s = await notesRepo.getStats()
+    setStats(s)
+  }
+
   useEffect(() => {
     getArchiveAfterDays().then(setDays)
     refreshUnused()
-    const onUpdate = () => refreshUnused()
+    refreshStats()
+    const onUpdate = () => {
+      refreshUnused()
+      refreshStats()
+    }
     window.addEventListener('data-updated', onUpdate)
     return () => window.removeEventListener('data-updated', onUpdate)
   }, [])
@@ -70,8 +80,26 @@ const Settings = () => {
       setCleanedMsg(`已删除 ${count} 个未用标签`)
       setTimeout(() => setCleanedMsg(''), 3000)
       await refreshUnused()
+      await refreshStats()
     } catch (e) {
       alert('删除失败：' + e.message)
+    } finally {
+      setCleaning(false)
+    }
+  }
+
+  const handleCleanOrphans = async () => {
+    if (!stats || stats.noteTags.orphan === 0) return
+    if (!confirm(`将清理 ${stats.noteTags.orphan} 个 orphan note_tags 链接（指向不存在笔记的 link）。继续？`)) return
+    setCleaning(true)
+    try {
+      const count = await notesRepo.cleanOrphanNoteTags()
+      setCleanedMsg(`已清理 ${count} 个 orphan 链接`)
+      setTimeout(() => setCleanedMsg(''), 3000)
+      await refreshStats()
+      await refreshUnused()
+    } catch (e) {
+      alert('清理失败：' + e.message)
     } finally {
       setCleaning(false)
     }
@@ -140,6 +168,46 @@ const Settings = () => {
             <Link to="/trash" className="text-sm text-[#0077B6] hover:underline block">
               回收站（30 天内可恢复）
             </Link>
+            <div className="pt-2 border-t border-gray-100">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm text-gray-700">数据库统计</span>
+                <button
+                  onClick={refreshStats}
+                  className="text-xs text-[#0077B6] hover:underline"
+                  title="重新计算"
+                >
+                  {stats === null ? '加载中...' : '刷新'}
+                </button>
+              </div>
+              {stats && (
+                <div className="text-xs text-gray-600 grid grid-cols-2 gap-x-3 gap-y-0.5 mb-2 font-mono">
+                  <span>笔记</span>
+                  <span className="text-right">
+                    active {stats.notes.active} · deleted {stats.notes.deleted} · archived {stats.notes.archived}
+                  </span>
+                  <span>标签</span>
+                  <span className="text-right">
+                    active {stats.tags.active} · deleted {stats.tags.deleted}
+                  </span>
+                  <span>note_tags 链接</span>
+                  <span className="text-right">
+                    active {stats.noteTags.active} · deleted {stats.noteTags.deleted}
+                    {stats.noteTags.orphan > 0 && (
+                      <span className="text-red-600 ml-1">· orphan {stats.noteTags.orphan}</span>
+                    )}
+                  </span>
+                </div>
+              )}
+              {stats && stats.noteTags.orphan > 0 && (
+                <button
+                  onClick={handleCleanOrphans}
+                  disabled={cleaning}
+                  className="text-xs px-3 py-1.5 border border-amber-500 text-amber-700 rounded-lg hover:bg-amber-50 disabled:opacity-50 transition-colors"
+                >
+                  {cleaning ? '清理中...' : `清理 ${stats.noteTags.orphan} 个 orphan 链接`}
+                </button>
+              )}
+            </div>
             <div className="pt-2 border-t border-gray-100">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-sm text-gray-700">未使用标签</span>

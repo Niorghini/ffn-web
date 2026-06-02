@@ -5,7 +5,6 @@
 import { useEffect, useState } from 'react'
 import { Trash2, RotateCcw, ArrowLeft } from 'lucide-react'
 import { Link } from 'react-router-dom'
-import { db } from '@/lib/db'
 import { notesRepo } from '@/repositories/notesRepo'
 import { runCleanup } from '@/lib/cleanup'
 
@@ -33,8 +32,7 @@ const Trash = () => {
 
   const handleHardDelete = async (id) => {
     if (!confirm('永久删除？此操作不可恢复。')) return
-    await db.notes.delete(id)
-    window.dispatchEvent(new CustomEvent('data-updated'))
+    await notesRepo.hardDelete(id)
   }
 
   const handleCleanup = async () => {

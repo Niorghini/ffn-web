@@ -120,11 +120,12 @@ export const notesRepo = {
 
   /**
    * 软删除（30 天可恢复）
+   * - 同时软删该笔记的所有活跃 note_tags 链接（避免 orphan）
    */
   async softDelete(id) {
     const ts = nowIso()
     let updated
-    await db.transaction('rw', db.notes, db.sync_queue, async () => {
+    await db.transaction('rw', db.notes, db.sync_queue, db.note_tags, async () => {
       const existing = await db.notes.get(id)
       if (!existing) throw new Error(`Note ${id} not found`)
       if (existing.deleted_at) {
@@ -140,18 +141,39 @@ export const notesRepo = {
       }
       await db.notes.put(updated)
       await enqueue('delete', id)
+      // 软删该笔记的活跃 link
+      const links = await db.note_tags.where('note_id').equals(id).toArray()
+      for (const link of links) {
+        if (link.deleted_at) continue
+        await db.note_tags.put({
+          ...link,
+          deleted_at: ts,
+          version: link.version + 1,
+          sync_status: 'pending',
+        })
+        await db.sync_queue.add({
+          type: 'tag_detach',
+          entity_type: 'note_tags',
+          entity_id: `${link.note_id}:${link.tag_id}`,
+          priority: 5,
+          status: 'pending',
+          created_at: ts,
+        })
+      }
     })
     emitDataUpdated('notes')
+    emitDataUpdated('note_tags')
     return updated
   },
 
   /**
    * 恢复软删除
+   * - 同时复活被 softDelete 软删的 note_tags links
    */
   async restore(id) {
     const ts = nowIso()
     let updated
-    await db.transaction('rw', db.notes, db.sync_queue, async () => {
+    await db.transaction('rw', db.notes, db.sync_queue, db.note_tags, async () => {
       const existing = await db.notes.get(id)
       if (!existing) throw new Error(`Note ${id} not found`)
       if (!existing.deleted_at) {
@@ -167,9 +189,79 @@ export const notesRepo = {
       }
       await db.notes.put(updated)
       await enqueue('restore', id)
+      // 复活被本次 softDelete 软删的 link（用 updated_at 匹配时间戳）
+      const links = await db.note_tags.where('note_id').equals(id).toArray()
+      for (const link of links) {
+        if (!link.deleted_at) continue
+        if (link.deleted_at !== existing.deleted_at) continue // 只复活被 softDelete 软删的
+        await db.note_tags.put({
+          ...link,
+          deleted_at: null,
+          version: link.version + 1,
+          sync_status: 'pending',
+        })
+        await db.sync_queue.add({
+          type: 'tag_attach',
+          entity_type: 'note_tags',
+          entity_id: `${link.note_id}:${link.tag_id}`,
+          priority: 5,
+          status: 'pending',
+          created_at: ts,
+        })
+      }
     })
     emitDataUpdated('notes')
+    emitDataUpdated('note_tags')
     return updated
+  },
+
+  /**
+   * 物理删除（不可恢复）
+   * - 删 note 行
+   * - 删该 note 的所有 note_tags 链接（避免 orphan）
+   * - 清残留 sync_queue entries
+   * - 不会推云端（云端靠 cleanup 30 天后处理；本方法是本地立即清理）
+   */
+  async hardDelete(id) {
+    await db.transaction('rw', db.notes, db.note_tags, db.sync_queue, async () => {
+      const existing = await db.notes.get(id)
+      if (!existing) return
+      // 删该 note 的所有 note_tags
+      const links = await db.note_tags.where('note_id').equals(id).toArray()
+      for (const link of links) {
+        await db.note_tags.delete([link.note_id, link.tag_id])
+      }
+      // 清残留 sync_queue entries
+      const queueItems = await db.sync_queue
+        .where('entity_id').equals(id)
+        .and((q) => q.entity_type === 'notes')
+        .toArray()
+      for (const q of queueItems) {
+        await db.sync_queue.delete(q.id)
+      }
+      // 物理删 note
+      await db.notes.delete(id)
+    })
+    emitDataUpdated('notes')
+    emitDataUpdated('note_tags')
+  },
+
+  /**
+   * 清理 orphan note_tags（note_id 在 db.notes 里不存在的链接）
+   * @returns 被清理的 link 数
+   */
+  async cleanOrphanNoteTags() {
+    const allLinks = await db.note_tags.toArray()
+    if (allLinks.length === 0) return 0
+    const noteIds = [...new Set(allLinks.map((l) => l.note_id))]
+    const existingNotes = await db.notes.where('id').anyOf(noteIds).toArray()
+    const existingIds = new Set(existingNotes.map((n) => n.id))
+    const orphanLinks = allLinks.filter((l) => !existingIds.has(l.note_id))
+    for (const link of orphanLinks) {
+      await db.note_tags.delete([link.note_id, link.tag_id])
+    }
+    if (orphanLinks.length > 0) emitDataUpdated('note_tags')
+    return orphanLinks.length
   },
 
   /**
@@ -237,6 +329,38 @@ export const notesRepo = {
 
   async getPendingSync() {
     return db.notes.where('sync_status').anyOf(['pending', 'failed']).toArray()
+  },
+
+  /**
+   * 数据统计：返回每个表的 active / deleted / total + orphan 计数
+   */
+  async getStats() {
+    const [allNotes, allTags, allLinks] = await Promise.all([
+      db.notes.toArray(),
+      db.tags.toArray(),
+      db.note_tags.toArray(),
+    ])
+    const noteIds = new Set(allNotes.map((n) => n.id))
+    const orphanLinks = allLinks.filter((l) => !noteIds.has(l.note_id))
+    return {
+      notes: {
+        total: allNotes.length,
+        active: allNotes.filter((n) => !n.deleted_at).length,
+        deleted: allNotes.filter((n) => !!n.deleted_at).length,
+        archived: allNotes.filter((n) => !!n.archived_at).length,
+      },
+      tags: {
+        total: allTags.length,
+        active: allTags.filter((t) => !t.deleted_at).length,
+        deleted: allTags.filter((t) => !!t.deleted_at).length,
+      },
+      noteTags: {
+        total: allLinks.length,
+        active: allLinks.filter((l) => !l.deleted_at).length,
+        deleted: allLinks.filter((l) => !!l.deleted_at).length,
+        orphan: orphanLinks.length,
+      },
+    }
   },
 }
 
