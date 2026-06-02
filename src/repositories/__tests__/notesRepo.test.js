@@ -197,4 +197,28 @@ describe('notesRepo', () => {
     const s = await notesRepo.getStats()
     expect(s.noteTags.orphan).toBe(1)
   })
+
+  // ── hardDelete 自动清理独占 tag ─────────────────────────────────
+  it('hardDelete 删唯一引用该 tag 的笔记 → tag 跟着删', async () => {
+    // 先建一个真 tag
+    const [t] = await db.tags.toArray()  // 还没数据
+    // 用 tagsRepo.findOrCreate 走完整流程
+    const { tagsRepo } = await import('@/repositories/tagsRepo')
+    const [tag] = await tagsRepo.findOrCreate(['only'])
+    const note = await notesRepo.create({ content: 'x', tagIds: [tag.id] })
+    expect(await db.tags.get(tag.id)).toBeTruthy()
+    await notesRepo.hardDelete(note.id)
+    expect(await db.tags.get(tag.id)).toBeUndefined()
+  })
+
+  it('hardDelete 不删仍有其他引用的 tag', async () => {
+    const { tagsRepo } = await import('@/repositories/tagsRepo')
+    const [tag] = await tagsRepo.findOrCreate(['shared'])
+    const n1 = await notesRepo.create({ content: 'a', tagIds: [tag.id] })
+    const n2 = await notesRepo.create({ content: 'b', tagIds: [tag.id] })
+    await notesRepo.hardDelete(n1.id)
+    expect(await db.tags.get(tag.id)).toBeTruthy()
+    await notesRepo.hardDelete(n2.id)
+    expect(await db.tags.get(tag.id)).toBeUndefined()
+  })
 })

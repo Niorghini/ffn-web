@@ -10,6 +10,7 @@ import { v4 as uuidv4 } from 'uuid'
 import { db, nowIso } from '@/lib/db'
 import { emitDataUpdated } from '@/lib/tags'
 import { noteTagsRepo } from './noteTagsRepo'
+import { tagsRepo } from './tagsRepo'
 
 const PRIORITY = { create: 1, restore: 3, update: 5, delete: 8 }
 
@@ -220,9 +221,16 @@ export const notesRepo = {
    * - 删 note 行
    * - 删该 note 的所有 note_tags 链接（避免 orphan）
    * - 清残留 sync_queue entries
+   * - **自动清理因此变成未用的 tag**（独占此 note 的 tag）：
+   *     对这个 note 引用过的每个 tag，检查删完之后还有没有活跃 link，
+   *     没有 → hardDelete（本地+云端）
    * - 不会推云端（云端靠 cleanup 30 天后处理；本方法是本地立即清理）
    */
   async hardDelete(id) {
+    // 先收一下这个 note 引用了哪些 tag（用来决定哪些 tag 变孤儿）
+    const linksBefore = await db.note_tags.where('note_id').equals(id).toArray()
+    const tagIdsToCheck = [...new Set(linksBefore.filter((l) => !l.deleted_at).map((l) => l.tag_id))]
+
     await db.transaction('rw', db.notes, db.note_tags, db.sync_queue, async () => {
       const existing = await db.notes.get(id)
       if (!existing) return
@@ -244,6 +252,24 @@ export const notesRepo = {
     })
     emitDataUpdated('notes')
     emitDataUpdated('note_tags')
+
+    // 自动清理：扫一下「这个 note 用过」的 tag，如果现在没有任何活跃 link + 没软删，hardDelete
+    if (tagIdsToCheck.length > 0) {
+      const allLinks = await db.note_tags.toArray()
+      const activeLinkTagIds = new Set(
+        allLinks.filter((l) => !l.deleted_at).map((l) => l.tag_id),
+      )
+      const orphanTagIds = tagIdsToCheck.filter((tid) => !activeLinkTagIds.has(tid))
+      for (const tid of orphanTagIds) {
+        const tag = await db.tags.get(tid)
+        if (!tag || tag.deleted_at) continue
+        // 复用 tagsRepo.hardDelete 走完整的「本地 + 云端 + sync_queue」清理
+        await tagsRepo.hardDelete(tid).catch((e) => {
+          console.warn(`[hardDelete] auto-clean tag ${tag.name} failed:`, e)
+        })
+      }
+      if (orphanTagIds.length > 0) emitDataUpdated('tags')
+    }
   },
 
   /**
