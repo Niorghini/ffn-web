@@ -162,6 +162,55 @@ describe('notesRepo', () => {
     await expect(notesRepo.hardDelete('nope')).resolves.toBeUndefined()
   })
 
+  // ── hardDelete 同步云端 ────────────────────────────────────────
+  it('hardDelete 调云端删 note + note_tags（先 link 后 note）', async () => {
+    const { supabase } = await import('@/lib/supabase')
+    const callOrder = []
+    const linkDelete = vi.fn(() => { callOrder.push('note_tags'); return { eq: vi.fn().mockReturnValue({ error: null }) } })
+    const noteDelete = vi.fn(() => { callOrder.push('notes'); return { eq: vi.fn().mockReturnValue({ error: null }) } })
+    supabase.from = vi.fn((name) => {
+      if (name === 'note_tags') return { delete: linkDelete }
+      if (name === 'notes') return { delete: noteDelete }
+      return { delete: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ error: null }) }) }
+    })
+    supabase.auth.getUser = vi.fn().mockResolvedValue({ data: { user: { id: 'u1' } } })
+
+    const note = await notesRepo.create({ content: 'x' })
+    await notesRepo.hardDelete(note.id)
+
+    expect(callOrder).toEqual(['note_tags', 'notes'])
+    expect(linkDelete).toHaveBeenCalled()
+    expect(noteDelete).toHaveBeenCalled()
+  })
+
+  it('hardDelete 云端失败不阻塞本地删除（best effort）', async () => {
+    const { supabase } = await import('@/lib/supabase')
+    supabase.from = vi.fn().mockReturnValue({
+      delete: vi.fn().mockReturnValue({ eq: vi.fn().mockReturnValue({ error: new Error('cloud 500') }) }),
+    })
+    supabase.auth.getUser = vi.fn().mockResolvedValue({ data: { user: { id: 'u1' } } })
+    const spy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    const note = await notesRepo.create({ content: 'x' })
+    await expect(notesRepo.hardDelete(note.id)).resolves.toBeUndefined()
+    expect(await db.notes.get(note.id)).toBeUndefined() // 本地仍删了
+    expect(spy).toHaveBeenCalled()
+
+    spy.mockRestore()
+  })
+
+  it('hardDelete 用户未登录时跳过云端', async () => {
+    const { supabase } = await import('@/lib/supabase')
+    const fromSpy = vi.fn()
+    supabase.from = fromSpy
+    supabase.auth.getUser = vi.fn().mockResolvedValue({ data: { user: null } })
+
+    const note = await notesRepo.create({ content: 'x' })
+    await notesRepo.hardDelete(note.id)
+    expect(fromSpy).not.toHaveBeenCalled() // 不调 supabase.from
+    expect(await db.notes.get(note.id)).toBeUndefined() // 本地照删
+  })
+
   // ── update 同步 tag 关联 ────────────────────────────────────────
   it('update 新增 #tag → link 创建 + tag 入库', async () => {
     const note = await notesRepo.create({ content: 'hi' })

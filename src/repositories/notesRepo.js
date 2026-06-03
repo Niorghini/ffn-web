@@ -11,6 +11,7 @@ import { db, nowIso } from '@/lib/db'
 import { emitDataUpdated, extractTagNames } from '@/lib/tags'
 import { noteTagsRepo } from './noteTagsRepo'
 import { tagsRepo } from './tagsRepo'
+import { supabase } from '@/lib/supabase'
 
 const PRIORITY = { create: 1, restore: 3, update: 5, delete: 8 }
 
@@ -279,25 +280,47 @@ export const notesRepo = {
    * - 删 note 行
    * - 删该 note 的所有 note_tags 链接（避免 orphan）
    * - 清残留 sync_queue entries
+   * - **同步删云端**：note 行 + note_tags 链接都从 supabase 物理删（best effort，
+   *   云端失败不阻塞本地——下次 sync 不会让云端软删行「复活」回本地）
    * - **自动清理因此变成未用的 tag**（独占此 note 的 tag）：
    *     对这个 note 引用过的每个 tag，检查删完之后还有没有活跃 link，
    *     没有 → hardDelete（本地+云端）
-   * - 不会推云端（云端靠 cleanup 30 天后处理；本方法是本地立即清理）
    */
   async hardDelete(id) {
     // 先收一下这个 note 引用了哪些 tag（用来决定哪些 tag 变孤儿）
     const linksBefore = await db.note_tags.where('note_id').equals(id).toArray()
     const tagIdsToCheck = [...new Set(linksBefore.filter((l) => !l.deleted_at).map((l) => l.tag_id))]
 
+    // 1. 云端同步删（先做；云端失败只 warn，不阻塞本地——避免让云端软删行「复活」回本地）
+    try {
+      const { data: userData } = await supabase.auth.getUser()
+      if (userData?.user) {
+        // 删云端 note_tags 链接（必须先删，否则会留 orphan 链接）
+        const { error: linkErr } = await supabase
+          .from('note_tags')
+          .delete()
+          .eq('note_id', id)
+        if (linkErr) throw linkErr
+        // 删云端 note 行
+        const { error: noteErr } = await supabase
+          .from('notes')
+          .delete()
+          .eq('id', id)
+        if (noteErr) throw noteErr
+      }
+    } catch (e) {
+      console.warn(`[hardDelete] 云端删除失败 (note=${id}):`, e?.message || e)
+      // 继续本地删除
+    }
+
+    // 2. 本地事务：删 note + 它的所有 link + 清 sync_queue 残留
     await db.transaction('rw', db.notes, db.note_tags, db.sync_queue, async () => {
       const existing = await db.notes.get(id)
       if (!existing) return
-      // 删该 note 的所有 note_tags
       const links = await db.note_tags.where('note_id').equals(id).toArray()
       for (const link of links) {
         await db.note_tags.delete([link.note_id, link.tag_id])
       }
-      // 清残留 sync_queue entries
       const queueItems = await db.sync_queue
         .where('entity_id').equals(id)
         .and((q) => q.entity_type === 'notes')
@@ -305,13 +328,12 @@ export const notesRepo = {
       for (const q of queueItems) {
         await db.sync_queue.delete(q.id)
       }
-      // 物理删 note
       await db.notes.delete(id)
     })
     emitDataUpdated('notes')
     emitDataUpdated('note_tags')
 
-    // 自动清理：扫一下「这个 note 用过」的 tag，如果现在没有任何活跃 link + 没软删，hardDelete
+    // 3. 自动清理：扫一下「这个 note 用过」的 tag，如果现在没有任何活跃 link + 没软删，hardDelete
     if (tagIdsToCheck.length > 0) {
       const allLinks = await db.note_tags.toArray()
       const activeLinkTagIds = new Set(
@@ -321,7 +343,6 @@ export const notesRepo = {
       for (const tid of orphanTagIds) {
         const tag = await db.tags.get(tid)
         if (!tag || tag.deleted_at) continue
-        // 复用 tagsRepo.hardDelete 走完整的「本地 + 云端 + sync_queue」清理
         await tagsRepo.hardDelete(tid).catch((e) => {
           console.warn(`[hardDelete] auto-clean tag ${tag.name} failed:`, e)
         })
