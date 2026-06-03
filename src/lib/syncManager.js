@@ -190,9 +190,7 @@ export class SyncManager {
         if (cloudIds.has(local[idCol])) continue
         // pending/failed：让 push 处理，删了会丢本地未同步改动
         if (local.sync_status === 'pending' || local.sync_status === 'failed') continue
-        // notes 软删：trash 里的笔记，不算硬删
-        if (entity === 'notes' && local.deleted_at) continue
-        // 真硬删：物理删本地
+        // 真硬删：物理删本地（notes 的 trash 副本也一并清——A 端已硬删，trash 留着没意义）
         if (entity === 'note_tags') {
           await this.db.note_tags.delete([local.note_id, local.tag_id])
         } else {

@@ -279,14 +279,14 @@ describe('SyncManager', () => {
     expect((await db.notes.get('pending-note')).sync_status).toBe('synced')
   })
 
-  it('cleanup 跳过软删 notes（trash 里的不删）', async () => {
+  it('软删 notes：云端没也照样清（A 端硬删的 B 端 trash 副本要消失）', async () => {
+    // 本地 B 有 X 的软删副本（deleted_at 不为 null，trash 里）
     await db.notes.add(mkNote({ id: 'trash', sync_status: 'synced', deleted_at: '2026-06-01T00:00:00.000Z' }))
-    // 远端没有这个 id
+    // 远端没有（已被 A 硬删）
     await sm.fullSync()
-    // 软删行**还在**——不是硬删
-    expect(await db.notes.get('trash')).toBeTruthy()
+    // 软删的 trash 副本**也得清掉**——A 端硬删了，留着 B 端 trash 副本没意义
+    expect(await db.notes.get('trash')).toBeUndefined()
   })
-
   it('cleanup 失败仅 warn，不阻塞 sync 其他步骤', async () => {
     // 让 select('id') 抛错
     sb.from = vi.fn((name) => ({
