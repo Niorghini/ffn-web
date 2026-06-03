@@ -3,17 +3,14 @@
  * - 卡片样式: 内容(带 tag inline 在原位置) + 时间 + hover 揭示图标
  * - 状态过滤 + 标签过滤 + 搜索过滤
  * - 行内 tag chip 可点击筛选
- * - useVirtualizer 虚拟滚动
+ * - **整页自然滚动**（不再有 maxHeight，列表按内容自然增长）
  */
 import { useEffect, useMemo, useState } from 'react'
 import { CheckCircle2, Circle, Trash2, Pencil } from 'lucide-react'
 import { useNotesStore } from '@/stores/useNotesStore'
 import { useTagsStore } from '@/stores/useTagsStore'
 import { notesRepo } from '@/repositories/notesRepo'
-import { useVirtualizer } from '@/hooks/useVirtualizer'
 import { db } from '@/lib/db'
-
-const ROW_HEIGHT = 124
 
 const TAG_RE = /#([\w一-鿿-]+)/g
 
@@ -69,11 +66,6 @@ const NoteList = ({ activeId, onSelect, refreshKey, onTagClick }) => {
     }
   }, [notes, tags])
 
-  const { containerRef, totalHeight, visible, offsetY } = useVirtualizer({
-    count: filtered.length,
-    rowHeight: ROW_HEIGHT,
-  })
-
   const handleToggleStatus = async (e, n) => {
     e.stopPropagation()
     const next = n.status === 'completed' ? 'pending' : 'completed'
@@ -108,36 +100,26 @@ const NoteList = ({ activeId, onSelect, refreshKey, onTagClick }) => {
           </button>
         </div>
       )}
-      <div ref={containerRef} className="overflow-y-auto" style={{ maxHeight: '60vh' }}>
-        {filtered.length === 0 ? (
-          <div className="py-16 text-center bg-white rounded-lg shadow-sm text-gray-400 text-sm">
-            {notes.length === 0 ? '还没有笔记，从上方写下第一条' : '没有匹配的笔记'}
-          </div>
-        ) : (
-          <div style={{ height: totalHeight, position: 'relative' }}>
-            <div style={{ transform: `translateY(${offsetY}px)` }}>
-              {visible.map((i) => {
-                const n = filtered[i]
-                const tagIds = linkMap.get(n.id) || []
-                return (
-                  <NoteRow
-                    key={n.id}
-                    note={n}
-                    active={activeId === n.id}
-                    onClick={() => onSelect(n.id)}
-                    onToggleStatus={(e) => handleToggleStatus(e, n)}
-                    onEdit={(e) => handleEdit(e, n)}
-                    onDelete={(e) => handleDelete(e, n)}
-                    onTagClick={onTagClick}
-                    tagByName={tagByName}
-                    tagIds={tagIds}
-                  />
-                )
-              })}
-            </div>
-          </div>
-        )}
-      </div>
+      {filtered.length === 0 ? (
+        <div className="py-16 text-center bg-white rounded-lg shadow-sm text-gray-400 text-sm">
+          {notes.length === 0 ? '还没有笔记，从上方写下第一条' : '没有匹配的笔记'}
+        </div>
+      ) : (
+        filtered.map((n) => (
+          <NoteRow
+            key={n.id}
+            note={n}
+            active={activeId === n.id}
+            onClick={() => onSelect(n.id)}
+            onToggleStatus={(e) => handleToggleStatus(e, n)}
+            onEdit={(e) => handleEdit(e, n)}
+            onDelete={(e) => handleDelete(e, n)}
+            onTagClick={onTagClick}
+            tagByName={tagByName}
+            tagIds={linkMap.get(n.id) || []}
+          />
+        ))
+      )}
     </section>
   )
 }
@@ -152,60 +134,55 @@ const NoteRow = ({
   onTagClick,
   tagByName,
   tagIds,
-}) => {
-  return (
+}) => (
+  <div
+    onClick={onClick}
+    className={`group relative bg-white rounded-lg shadow-sm px-4 py-3 cursor-pointer transition-colors border ${
+      active ? 'border-[#0077B6]' : 'border-transparent hover:border-gray-200'
+    }`}
+  >
     <div
-      onClick={onClick}
-      style={{ height: ROW_HEIGHT }}
-      className={`group relative bg-white rounded-lg shadow-sm px-4 py-3 mb-2 cursor-pointer transition-colors border ${
-        active ? 'border-[#0077B6]' : 'border-transparent hover:border-gray-200'
+      className={`text-sm leading-relaxed line-clamp-2 break-words ${
+        note.status === 'completed' ? 'line-through text-gray-400' : 'text-gray-800'
       }`}
     >
-      {/* 内容区：tag chip 保留在原文位置 */}
-      <div
-        className={`text-sm leading-relaxed line-clamp-2 break-words ${
-          note.status === 'completed' ? 'line-through text-gray-400' : 'text-gray-800'
-        }`}
-      >
-        {renderContentWithTags(note.content, tagByName, onTagClick)}
-      </div>
-      {/* 底部：左时间 + 右 hover 图标 */}
-      <div className="absolute bottom-2 left-4 right-3 flex items-end justify-between">
-        <span className="text-xs text-gray-400">{formatTime(note.created_at)}</span>
-        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-          <button
-            onClick={(e) => onToggleStatus(e)}
-            className="text-gray-400 hover:text-[#0077B6] transition-colors"
-            aria-label="切换状态"
-            title="切换状态"
-          >
-            {note.status === 'completed' ? (
-              <CheckCircle2 size={16} className="text-green-500" />
-            ) : (
-              <Circle size={16} />
-            )}
-          </button>
-          <button
-            onClick={(e) => onEdit(e)}
-            className="text-gray-400 hover:text-[#0077B6] transition-colors"
-            aria-label="编辑"
-            title="编辑（下一步实现）"
-          >
-            <Pencil size={15} />
-          </button>
-          <button
-            onClick={(e) => onDelete(e)}
-            className="text-gray-400 hover:text-red-500 transition-colors"
-            aria-label="删除"
-            title="删除"
-          >
-            <Trash2 size={15} />
-          </button>
-        </div>
+      {renderContentWithTags(note.content, tagByName, onTagClick)}
+    </div>
+    <div className="flex items-end justify-between mt-2">
+      <span className="text-xs text-gray-400">{formatTime(note.created_at)}</span>
+      <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+        <button
+          onClick={onToggleStatus}
+          className="text-gray-400 hover:text-[#0077B6] transition-colors"
+          aria-label="切换状态"
+          title="切换状态"
+        >
+          {note.status === 'completed' ? (
+            <CheckCircle2 size={16} className="text-green-500" />
+          ) : (
+            <Circle size={16} />
+          )}
+        </button>
+        <button
+          onClick={onEdit}
+          className="text-gray-400 hover:text-[#0077B6] transition-colors"
+          aria-label="编辑"
+          title="编辑（下一步实现）"
+        >
+          <Pencil size={15} />
+        </button>
+        <button
+          onClick={onDelete}
+          className="text-gray-400 hover:text-red-500 transition-colors"
+          aria-label="删除"
+          title="删除"
+        >
+          <Trash2 size={15} />
+        </button>
       </div>
     </div>
-  )
-}
+  </div>
+)
 
 /**
  * 渲染内容，tag chip 保留在原文位置（不脱出来）
@@ -217,7 +194,6 @@ const renderContentWithTags = (content, tagByName, onTagClick) => {
   const parts = []
   let lastIndex = 0
   let match
-  // 正则带 g flag 必须重置 lastIndex（每次调用都是新 RegExp 实例）
   TAG_RE.lastIndex = 0
   while ((match = TAG_RE.exec(content)) !== null) {
     if (match.index > lastIndex) {
