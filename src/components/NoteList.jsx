@@ -3,13 +3,15 @@
  * - 卡片样式: 内容(带 tag inline 在原位置) + 时间 + hover 揭示图标
  * - 状态过滤 + 标签过滤 + 搜索过滤
  * - 行内 tag chip 可点击筛选
- * - **整页自然滚动**（不再有 maxHeight，列表按内容自然增长）
+ * - **就地编辑**：点 Pencil → 卡片内出 textarea + 保存/取消
+ * - 整页自然滚动
  */
-import { useEffect, useMemo, useState } from 'react'
-import { CheckCircle2, Circle, Trash2, Pencil } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { CheckCircle2, Circle, Trash2, Pencil, X as XIcon } from 'lucide-react'
 import { useNotesStore } from '@/stores/useNotesStore'
 import { useTagsStore } from '@/stores/useTagsStore'
 import { notesRepo } from '@/repositories/notesRepo'
+import { extractTagNames } from '@/lib/tags'
 import { db } from '@/lib/db'
 
 const TAG_RE = /#([\w一-鿿-]+)/g
@@ -18,6 +20,8 @@ const NoteList = ({ activeId, onSelect, refreshKey, onTagClick }) => {
   const { notes, statusFilter, searchQuery, activeTagId, setStatusFilter, setSearchQuery, load, resetFilters } = useNotesStore()
   const { tags, load: loadTags } = useTagsStore()
   const [, setTick] = useState(0)
+  // 当前在「就地编辑」的笔记 id
+  const [editingId, setEditingId] = useState(null)
 
   useEffect(() => {
     load()
@@ -68,20 +72,44 @@ const NoteList = ({ activeId, onSelect, refreshKey, onTagClick }) => {
 
   const handleToggleStatus = async (e, n) => {
     e.stopPropagation()
+    if (editingId === n.id) return
     const next = n.status === 'completed' ? 'pending' : 'completed'
     await notesRepo.setStatus(n.id, next)
   }
 
   const handleDelete = async (e, n) => {
     e.stopPropagation()
+    if (editingId === n.id) return
     if (!confirm('确定删除？30 天内可在回收站恢复。')) return
     await notesRepo.softDelete(n.id)
   }
 
   const handleEdit = (e, n) => {
     e.stopPropagation()
-    // TODO 编辑功能下一步实现；现在跟点行一样：选笔记载入编辑区
     onSelect(n.id)
+    setEditingId(n.id)
+  }
+
+  const handleSave = async (n, newContent) => {
+    const trimmed = newContent.trim()
+    if (!trimmed) {
+      alert('内容不能为空')
+      return
+    }
+    try {
+      // 一次性更新：内容 + tag 关联同步（在 update 内部完成）
+      await notesRepo.update(n.id, { content: newContent })
+      setEditingId(null)
+    } catch (e) {
+      alert('保存失败：' + e.message)
+    }
+  }
+
+  const handleCancel = (n, originalContent, currentContent) => {
+    if (currentContent !== originalContent) {
+      if (!confirm('有未保存的修改，确定取消？')) return
+    }
+    setEditingId(null)
   }
 
   const tagByName = useMemo(() => {
@@ -110,10 +138,13 @@ const NoteList = ({ activeId, onSelect, refreshKey, onTagClick }) => {
             key={n.id}
             note={n}
             active={activeId === n.id}
+            editing={editingId === n.id}
             onClick={() => onSelect(n.id)}
             onToggleStatus={(e) => handleToggleStatus(e, n)}
             onEdit={(e) => handleEdit(e, n)}
             onDelete={(e) => handleDelete(e, n)}
+            onSave={(content) => handleSave(n, content)}
+            onCancel={(original, current) => handleCancel(n, original, current)}
             onTagClick={onTagClick}
             tagByName={tagByName}
             tagIds={linkMap.get(n.id) || []}
@@ -127,68 +158,177 @@ const NoteList = ({ activeId, onSelect, refreshKey, onTagClick }) => {
 const NoteRow = ({
   note,
   active,
+  editing,
   onClick,
   onToggleStatus,
   onEdit,
   onDelete,
+  onSave,
+  onCancel,
   onTagClick,
   tagByName,
   tagIds,
-}) => (
-  <div
-    onClick={onClick}
-    className={`group relative bg-white rounded-lg shadow-sm px-4 py-3 cursor-pointer transition-colors border ${
-      active ? 'border-[#0077B6]' : 'border-transparent hover:border-gray-200'
-    }`}
-  >
+}) => {
+  if (editing) {
+    return (
+      <NoteRowEditor
+        note={note}
+        onSave={onSave}
+        onCancel={onCancel}
+        tagByName={tagByName}
+      />
+    )
+  }
+  return (
     <div
-      className={`text-sm leading-relaxed whitespace-pre-wrap break-words ${
-        note.status === 'completed' ? 'line-through text-gray-400' : 'text-gray-800'
+      onClick={onClick}
+      className={`group relative bg-white rounded-lg shadow-sm px-4 py-3 cursor-pointer transition-colors border ${
+        active ? 'border-[#0077B6]' : 'border-transparent hover:border-gray-200'
       }`}
     >
-      {renderContentWithTags(note.content, tagByName, onTagClick)}
-    </div>
-    <div className="flex items-end justify-between mt-3">
-      <span className="text-xs text-gray-400">{formatTime(note.created_at)}</span>
-      <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-        <button
-          onClick={onToggleStatus}
-          className="text-gray-400 hover:text-[#0077B6] transition-colors"
-          aria-label="切换状态"
-          title="切换状态"
-        >
-          {note.status === 'completed' ? (
-            <CheckCircle2 size={16} className="text-green-500" />
-          ) : (
-            <Circle size={16} />
-          )}
-        </button>
-        <button
-          onClick={onEdit}
-          className="text-gray-400 hover:text-[#0077B6] transition-colors"
-          aria-label="编辑"
-          title="编辑（下一步实现）"
-        >
-          <Pencil size={15} />
-        </button>
-        <button
-          onClick={onDelete}
-          className="text-gray-400 hover:text-red-500 transition-colors"
-          aria-label="删除"
-          title="删除"
-        >
-          <Trash2 size={15} />
-        </button>
+      <div
+        className={`text-sm leading-relaxed whitespace-pre-wrap break-words ${
+          note.status === 'completed' ? 'line-through text-gray-400' : 'text-gray-800'
+        }`}
+      >
+        {renderContentWithTags(note.content, tagByName, onTagClick)}
+      </div>
+      <div className="flex items-end justify-between mt-3">
+        <span className="text-xs text-gray-400">{formatTime(note.created_at)}</span>
+        <div className="flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
+          <button
+            onClick={onToggleStatus}
+            className="text-gray-400 hover:text-[#0077B6] transition-colors"
+            aria-label="切换状态"
+            title="切换状态"
+          >
+            {note.status === 'completed' ? (
+              <CheckCircle2 size={16} className="text-green-500" />
+            ) : (
+              <Circle size={16} />
+            )}
+          </button>
+          <button
+            onClick={onEdit}
+            className="text-gray-400 hover:text-[#0077B6] transition-colors"
+            aria-label="编辑"
+            title="编辑"
+          >
+            <Pencil size={15} />
+          </button>
+          <button
+            onClick={onDelete}
+            className="text-gray-400 hover:text-red-500 transition-colors"
+            aria-label="删除"
+            title="删除"
+          >
+            <Trash2 size={15} />
+          </button>
+        </div>
       </div>
     </div>
-  </div>
-)
+  )
+}
+
+/**
+ * 就地编辑模式 —— 卡片内嵌入 textarea + 保存/取消
+ * - 实时识别 #tag 显示在下方
+ * - Ctrl+Enter 保存，Esc 取消
+ */
+const NoteRowEditor = ({ note, onSave, onCancel, tagByName }) => {
+  const [content, setContent] = useState(note.content)
+  const [saving, setSaving] = useState(false)
+  const taRef = useRef(null)
+
+  useEffect(() => {
+    taRef.current?.focus()
+    // 光标移到末尾
+    const ta = taRef.current
+    if (ta) {
+      const len = ta.value.length
+      ta.setSelectionRange(len, len)
+    }
+  }, [])
+
+  const handleSave = async () => {
+    if (saving) return
+    setSaving(true)
+    try {
+      await onSave(content)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleCancel = () => {
+    onCancel(note.content, content)
+  }
+
+  const handleKey = (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault()
+      handleCancel()
+    } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault()
+      handleSave()
+    }
+  }
+
+  const tags = extractTagNames(content)
+
+  return (
+    <div className="bg-white rounded-lg shadow-sm px-4 py-3 border border-[#0077B6]">
+      <textarea
+        ref={taRef}
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        onKeyDown={handleKey}
+        onClick={(e) => e.stopPropagation()}
+        rows={Math.max(3, content.split('\n').length)}
+        className="w-full resize-none outline-none text-sm leading-relaxed whitespace-pre-wrap break-words border-0 p-0 bg-transparent placeholder:text-gray-400 focus:ring-0"
+      />
+      <div className="flex flex-wrap gap-1 mt-2 min-h-[20px]">
+        {tags.map((t) => {
+          const tag = tagByName.get(t)
+          const color = tag?.color || '#9CA3AF'
+          return (
+            <span
+              key={t}
+              className="text-[10px] px-1.5 py-0.5 rounded"
+              style={{ background: `${color}20`, color }}
+            >
+              #{t}
+            </span>
+          )
+        })}
+      </div>
+      <div className="flex items-end justify-between mt-3">
+        <span className="text-xs text-gray-400">{content.length} 字</span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={(e) => { e.stopPropagation(); handleCancel() }}
+            disabled={saving}
+            className="flex items-center gap-1 px-3 py-1.5 text-xs border border-gray-300 text-gray-700 rounded-lg hover:bg-gray-50 disabled:opacity-50 transition-colors"
+          >
+            <XIcon size={12} />
+            取消
+          </button>
+          <button
+            onClick={(e) => { e.stopPropagation(); handleSave() }}
+            disabled={saving}
+            className="flex items-center gap-1 px-3 py-1.5 text-xs bg-[#0077B6] text-white rounded-lg hover:bg-[#005f8c] disabled:opacity-50 transition-colors"
+          >
+            <CheckCircle2 size={12} />
+            {saving ? '保存中...' : '保存'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
 
 /**
  * 渲染内容，tag chip 保留在原文位置（不脱出来）
- * @param {string} content 原文
- * @param {Map<string, {color: string}>} tagByName 名字→tag 实体映射
- * @param {(e, tagId) => void} onTagClick chip 点击回调
  */
 const renderContentWithTags = (content, tagByName, onTagClick) => {
   const parts = []

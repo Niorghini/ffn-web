@@ -8,7 +8,7 @@
  */
 import { v4 as uuidv4 } from 'uuid'
 import { db, nowIso } from '@/lib/db'
-import { emitDataUpdated } from '@/lib/tags'
+import { emitDataUpdated, extractTagNames } from '@/lib/tags'
 import { noteTagsRepo } from './noteTagsRepo'
 import { tagsRepo } from './tagsRepo'
 
@@ -66,11 +66,22 @@ export const notesRepo = {
 
   /**
    * 更新内容（bump version）
+   * 同时根据新 content 同步 tag 关联：
+   *   - 解析 #tag 名字，findOrCreate 进 tag 库
+   *   - 与当前活跃 link 集合求 diff：
+   *     · 新出现的 tag  → 创建 link
+   *     · 消失的 tag    → 软删 link（保留历史可恢复）
+   *   - 全部入 sync_queue，等 sync 推到云端
    */
   async update(id, { content }) {
     const ts = nowIso()
     let updated
-    await db.transaction('rw', db.notes, db.sync_queue, async () => {
+    // 先在事务外 findOrCreate（不要求在事务内，但 link 写入需要在事务里）
+    const desiredNames = [...new Set(extractTagNames(content))]
+    const desiredTags = await tagsRepo.findOrCreate(desiredNames)
+    const desiredTagIds = new Set(desiredTags.map((t) => t.id))
+
+    await db.transaction('rw', db.notes, db.sync_queue, db.note_tags, async () => {
       const existing = await db.notes.get(id)
       if (!existing) throw new Error(`Note ${id} not found`)
       if (existing.deleted_at) throw new Error('Cannot update a deleted note')
@@ -83,8 +94,55 @@ export const notesRepo = {
       }
       await db.notes.put(updated)
       await enqueue('update', id)
+
+      // 同步 tag 关联
+      const currentLinks = await db.note_tags.where('note_id').equals(id).toArray()
+      const activeCurrentTagIds = new Set(
+        currentLinks.filter((l) => !l.deleted_at).map((l) => l.tag_id),
+      )
+      const toAdd = [...desiredTagIds].filter((tid) => !activeCurrentTagIds.has(tid))
+      const toRemove = [...activeCurrentTagIds].filter((tid) => !desiredTagIds.has(tid))
+
+      for (const tagId of toAdd) {
+        await db.note_tags.put({
+          note_id: id,
+          tag_id: tagId,
+          created_at: ts,
+          deleted_at: null,
+          version: 1,
+          sync_status: 'pending',
+          last_synced_at: null,
+        })
+        await db.sync_queue.add({
+          type: 'tag_attach',
+          entity_type: 'note_tags',
+          entity_id: `${id}:${tagId}`,
+          priority: 5,
+          status: 'pending',
+          created_at: ts,
+        })
+      }
+      for (const tagId of toRemove) {
+        const link = currentLinks.find((l) => l.tag_id === tagId && !l.deleted_at)
+        if (!link) continue
+        await db.note_tags.put({
+          ...link,
+          deleted_at: ts,
+          version: link.version + 1,
+          sync_status: 'pending',
+        })
+        await db.sync_queue.add({
+          type: 'tag_detach',
+          entity_type: 'note_tags',
+          entity_id: `${id}:${tagId}`,
+          priority: 5,
+          status: 'pending',
+          created_at: ts,
+        })
+      }
     })
     emitDataUpdated('notes')
+    emitDataUpdated('note_tags')
     return updated
   },
 

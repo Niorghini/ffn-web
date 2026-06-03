@@ -20,7 +20,6 @@ import logoUrl from '/logo.png'
 const MainApp = () => {
   const { user } = useAuthStore()
   const { activeId, setActiveId, setActiveTagId, searchQuery, setSearchQuery, load } = useNotesStore()
-  const [activeNote, setActiveNote] = useState(null)
   const [refreshKey, setRefreshKey] = useState(0)
 
   useEffect(() => {
@@ -28,21 +27,12 @@ const MainApp = () => {
   }, [load])
 
   useEffect(() => {
-    if (!activeId) {
-      setActiveNote(null)
-      return
-    }
-    db.notes.get(activeId).then(setActiveNote)
-  }, [activeId, refreshKey])
-
-  useEffect(() => {
     const handler = () => {
       setRefreshKey((k) => k + 1)
-      if (activeId) db.notes.get(activeId).then(setActiveNote)
     }
     window.addEventListener('data-updated', handler)
     return () => window.removeEventListener('data-updated', handler)
-  }, [activeId])
+  }, [])
 
   const handleSelect = (id) => {
     setActiveId(id)
@@ -75,10 +65,10 @@ const MainApp = () => {
         <div className="flex flex-col lg:flex-row gap-6">
           <div className="flex-1 space-y-6 min-w-0">
             <Editor
-              key={activeId || 'new'}
-              note={activeNote}
+              key="new"
+              note={null}
               onSaved={handleSaved}
-              onCancel={() => setActiveId(null)}
+              onCancel={() => {}}
             />
             <SearchBar value={searchQuery} onChange={setSearchQuery} />
             <NoteList

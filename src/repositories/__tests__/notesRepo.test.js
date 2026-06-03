@@ -158,8 +158,67 @@ describe('notesRepo', () => {
     expect(after).toHaveLength(0)
   })
 
-  it('hardDelete 不存在的 id no-op', async () => {
+  it('硬删的不存在的 id no-op', async () => {
     await expect(notesRepo.hardDelete('nope')).resolves.toBeUndefined()
+  })
+
+  // ── update 同步 tag 关联 ────────────────────────────────────────
+  it('update 新增 #tag → link 创建 + tag 入库', async () => {
+    const note = await notesRepo.create({ content: 'hi' })
+    expect(await db.notes.get(note.id)).toBeTruthy()
+    // 还没 link
+    expect(await db.note_tags.where('note_id').equals(note.id).count()).toBe(0)
+    // 用 update 加 #newtag
+    await notesRepo.update(note.id, { content: 'hi #newtag' })
+    const links = await db.note_tags.where('note_id').equals(note.id).toArray()
+    const activeLinks = links.filter((l) => !l.deleted_at)
+    expect(activeLinks).toHaveLength(1)
+    // tag 入库
+    const tag = await db.tags.where('name').equals('newtag').first()
+    expect(tag).toBeTruthy()
+    expect(tag.id).toBe(activeLinks[0].tag_id)
+  })
+
+  it('update 去掉 #tag → 软删 link（不删 tag 本身）', async () => {
+    const { tagsRepo } = await import('@/repositories/tagsRepo')
+    const [t] = await tagsRepo.findOrCreate(['gone'])
+    const note = await notesRepo.create({ content: 'hi #gone', tagIds: [t.id] })
+    expect(await db.note_tags.where('note_id').equals(note.id).filter((l) => !l.deleted_at).count()).toBe(1)
+    await notesRepo.update(note.id, { content: 'hi (no tag now)' })
+    const links = await db.note_tags.where('note_id').equals(note.id).toArray()
+    expect(links).toHaveLength(1) // 行还在
+    expect(links[0].deleted_at).toBeTruthy() // 但软删了
+    // tag 本身还在（不删实体）
+    expect(await db.tags.get(t.id)).toBeTruthy()
+  })
+
+  it('update 保留活跃 link（不重置未变的）', async () => {
+    const { tagsRepo } = await import('@/repositories/tagsRepo')
+    const [t1] = await tagsRepo.findOrCreate(['t1'])
+    const note = await notesRepo.create({ content: 'a #t1', tagIds: [t1.id] })
+    const before = await db.note_tags.where('note_id').equals(note.id).filter((l) => !l.deleted_at).first()
+    // update 不改 tag（同样 #t1）
+    await notesRepo.update(note.id, { content: 'a #t1 updated text' })
+    const after = await db.note_tags.where('note_id').equals(note.id).filter((l) => !l.deleted_at).first()
+    expect(after.id).toBe(before.id) // 同一个 link
+    expect(after.version).toBe(before.version) // version 没动（因为 link 没改）
+  })
+
+  it('update 同时增 + 删 tag：增的 link 创建 + 删的 link 软删', async () => {
+    const { tagsRepo } = await import('@/repositories/tagsRepo')
+    const [t1] = await tagsRepo.findOrCreate(['t1'])
+    const note = await notesRepo.create({ content: 'old #t1', tagIds: [t1.id] })
+    await notesRepo.update(note.id, { content: 'new #t2' })
+    const links = await db.note_tags.where('note_id').equals(note.id).toArray()
+    const active = links.filter((l) => !l.deleted_at)
+    expect(active).toHaveLength(1)
+    // t1 被软删
+    const t1Link = links.find((l) => l.tag_id === t1.id)
+    expect(t1Link.deleted_at).toBeTruthy()
+    // t2 创建
+    const t2 = await db.tags.where('name').equals('t2').first()
+    expect(t2).toBeTruthy()
+    expect(active[0].tag_id).toBe(t2.id)
   })
 
   // ── cleanOrphanNoteTags ─────────────────────────────────────────
