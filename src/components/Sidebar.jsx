@@ -152,7 +152,7 @@ const Sidebar = ({ onSync }) => {
 const StatusPill = ({ icon, label, count, active, onClick }) => (
   <button
     onClick={onClick}
-    className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-full text-xs transition-colors ${
+    className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg text-xs transition-colors ${
       active
         ? 'bg-[#0077B6] text-white'
         : 'bg-blue-50 text-[#0077B6] hover:bg-blue-100'
