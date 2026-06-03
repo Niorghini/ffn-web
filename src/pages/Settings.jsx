@@ -1,14 +1,15 @@
 /**
- * Settings 页面：账号、同步、自动归档、登出
+ * Settings 页面：账号（邮箱/同步/登出）、数据导入导出、自动归档、数据、危险操作
  * v0.7.0 风格：白底卡片、圆角
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { ArrowLeft, RefreshCw, LogOut, Eraser, RotateCcw } from 'lucide-react'
+import { ArrowLeft, RefreshCw, LogOut, Eraser, RotateCcw, Download, Upload } from 'lucide-react'
 import { getArchiveAfterDays, setArchiveAfterDays, runArchive } from '@/lib/autoArchive'
 import { tagsRepo } from '@/repositories/tagsRepo'
 import { notesRepo } from '@/repositories/notesRepo'
 import { fullReset } from '@/lib/factoryReset'
+import { exportDataAsJson, importData, validateImport } from '@/lib/dataIO'
 import { useAuthStore } from '@/stores/useAuthStore'
 import { getSyncManager } from '@/lib/syncInstance'
 import { useSyncStore } from '@/stores/useSyncStore'
@@ -29,6 +30,9 @@ const Settings = () => {
   const [cleaning, setCleaning] = useState(false)
   const [cleanedMsg, setCleanedMsg] = useState('')
   const [resetting, setResetting] = useState(false)
+  const [importing, setImporting] = useState(false)
+  const [importMsg, setImportMsg] = useState('')
+  const fileInputRef = useRef(null)
 
   const refreshUnused = async () => {
     const u = await tagsRepo.findUnused()
@@ -66,6 +70,60 @@ const Settings = () => {
 
   const handleSync = async () => {
     await getSyncManager().fullSync()
+  }
+
+  const handleExport = async () => {
+    const json = await exportDataAsJson()
+    const blob = new Blob([json], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    const date = new Date().toISOString().slice(0, 10)
+    a.href = url
+    a.download = `ffnmv-backup-${date}.json`
+    a.click()
+    URL.revokeObjectURL(url)
+  }
+
+  const handleImportFile = async (e) => {
+    const file = e.target.files?.[0]
+    // 重置 value 使相同文件可重新触发
+    e.target.value = ''
+    if (!file) return
+    setImporting(true)
+    setImportMsg('')
+    try {
+      const text = await file.text()
+      let raw
+      try {
+        raw = JSON.parse(text)
+      } catch {
+        setImportMsg('导入失败：文件不是有效的 JSON')
+        return
+      }
+      const v = validateImport(raw)
+      if (!v.ok) {
+        setImportMsg(`导入失败：${v.error}`)
+        return
+      }
+      const ok = confirm(
+        `即将合并导入：\n` +
+        `  笔记 ${raw.notes.length} 条、标签 ${raw.tags.length} 个、链接 ${raw.noteTags.length} 个\n\n` +
+        `合并规则：按 id / [note_id+tag_id] 去重覆盖；不同 id 的内容两边都保留。\n` +
+        `导入完成后会推送到云端。\n\n` +
+        `继续？`,
+      )
+      if (!ok) return
+      const stats = await importData(raw)
+      setImportMsg(
+        `导入完成 · 笔记 新增 ${stats.notes.added} / 覆盖 ${stats.notes.updated}，` +
+        `标签 新增 ${stats.tags.added} / 覆盖 ${stats.tags.updated}，` +
+        `链接 新增 ${stats.noteTags.added} / 覆盖 ${stats.noteTags.updated}`,
+      )
+    } catch (err) {
+      setImportMsg(`导入失败：${err.message}`)
+    } finally {
+      setImporting(false)
+    }
   }
 
   const handleHardDeleteUnused = async () => {
@@ -138,23 +196,68 @@ const Settings = () => {
       </header>
 
       <div className="max-w-2xl mx-auto p-6 space-y-4">
-        <section className="bg-white rounded-lg shadow-sm p-4 space-y-2">
+        <section className="bg-white rounded-lg shadow-sm p-4 space-y-3">
           <h2 className="text-sm font-medium text-gray-800">账号</h2>
-          <div className="text-sm text-gray-600">{user?.email}</div>
-          <div className="text-xs text-gray-400">
-            {lastSyncAt && `上次同步 ${new Date(lastSyncAt).toLocaleString('zh-CN')}`}
+          <div>
+            <div className="text-sm text-gray-600">{user?.email}</div>
+            <div className="text-xs text-gray-400">
+              {lastSyncAt && `上次同步 ${new Date(lastSyncAt).toLocaleString('zh-CN')}`}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={handleSync}
+              className="text-sm px-3 py-1.5 border border-gray-200 rounded-lg hover:bg-gray-50 flex items-center gap-1.5 transition-colors"
+            >
+              <RefreshCw size={14} />
+              立即同步
+            </button>
+            <button
+              onClick={signOut}
+              className="text-sm px-3 py-1.5 border border-red-500 text-red-600 rounded-lg hover:bg-red-50 flex items-center gap-1.5 transition-colors ml-auto"
+            >
+              <LogOut size={14} />
+              退出登录
+            </button>
           </div>
         </section>
 
         <section className="bg-white rounded-lg shadow-sm p-4 space-y-3">
-          <h2 className="text-sm font-medium text-gray-800">同步</h2>
-          <button
-            onClick={handleSync}
-            className="text-sm px-3 py-1.5 border border-gray-200 rounded-lg hover:bg-gray-50 flex items-center gap-1.5 transition-colors"
-          >
-            <RefreshCw size={14} />
-            立即同步
-          </button>
+          <div>
+            <h2 className="text-sm font-medium text-gray-800">数据导入导出</h2>
+            <p className="text-xs text-gray-500 mt-1">
+              导出本地全部数据为 JSON 文件，或从 JSON 文件合并导入（按 id 去重覆盖）。
+            </p>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              onClick={handleExport}
+              className="text-sm px-3 py-1.5 border border-gray-200 rounded-lg hover:bg-gray-50 flex items-center gap-1.5 transition-colors"
+            >
+              <Download size={14} />
+              导出数据
+            </button>
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={importing}
+              className="text-sm px-3 py-1.5 border border-gray-200 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5 transition-colors"
+            >
+              <Upload size={14} />
+              {importing ? '导入中...' : '导入数据'}
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              onChange={handleImportFile}
+              className="hidden"
+            />
+          </div>
+          {importMsg && (
+            <div className={`text-xs ${importMsg.startsWith('导入失败') ? 'text-red-600' : 'text-[#0077B6]'}`}>
+              {importMsg}
+            </div>
+          )}
         </section>
 
         <section className="bg-white rounded-lg shadow-sm p-4 space-y-3">
@@ -277,13 +380,6 @@ const Settings = () => {
         <section className="bg-white rounded-lg shadow-sm p-4">
           <h2 className="text-sm font-medium text-red-600 mb-3">危险操作</h2>
           <div className="space-y-2">
-            <button
-              onClick={signOut}
-              className="text-sm px-3 py-1.5 border border-red-500 text-red-600 rounded-lg hover:bg-red-50 flex items-center gap-1.5 transition-colors"
-            >
-              <LogOut size={14} />
-              退出登录
-            </button>
             <button
               onClick={handleFactoryReset}
               disabled={resetting}
