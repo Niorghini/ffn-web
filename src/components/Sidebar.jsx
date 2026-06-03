@@ -4,7 +4,7 @@
  */
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
-import { RefreshCw, Trash2, Settings, LogOut, Hash, Inbox, Tag as TagIcon, Search, X } from 'lucide-react'
+import { RefreshCw, Trash2, Settings, LogOut, Hash, Inbox, Tag as TagIcon, Search, X, ListFilter, Circle, CheckCircle2, Rows3 } from 'lucide-react'
 import { useTagsStore } from '@/stores/useTagsStore'
 import { useNotesStore } from '@/stores/useNotesStore'
 import { useAuthStore } from '@/stores/useAuthStore'
@@ -55,29 +55,33 @@ const Sidebar = ({ onSync }) => {
         />
       </section>
 
-      {/* 状态筛选 + 统计 */}
+      {/* 状态筛选 */}
       <section className="bg-white rounded-lg shadow-sm p-4">
-        <h3 className="text-sm font-medium text-gray-700 mb-2">状态</h3>
-        <div className="space-y-1">
-          <StatRow
-            label="全部"
-            count={totalCount}
-            active={statusFilter === 'all' && !activeTagId}
-            onClick={() => { setStatusFilter('all'); setActiveTagId(null) }}
-          />
-          <StatRow
+        <div className="flex items-center gap-1.5 mb-3">
+          <ListFilter size={14} className="text-gray-500" />
+          <h3 className="text-sm font-medium text-gray-700">筛选</h3>
+        </div>
+        <div className="flex items-center gap-2">
+          <StatusPill
+            icon={<Circle size={14} />}
             label="未处理"
             count={pendingCount}
             active={statusFilter === 'pending'}
             onClick={() => setStatusFilter('pending')}
-            color="text-amber-600"
           />
-          <StatRow
+          <StatusPill
+            icon={<CheckCircle2 size={14} />}
             label="已处理"
             count={completedCount}
             active={statusFilter === 'completed'}
             onClick={() => setStatusFilter('completed')}
-            color="text-green-600"
+          />
+          <StatusPill
+            icon={<Rows3 size={14} />}
+            label="全部"
+            count={totalCount}
+            active={statusFilter === 'all' && !activeTagId}
+            onClick={() => { setStatusFilter('all'); setActiveTagId(null) }}
           />
         </div>
       </section>
@@ -145,15 +149,18 @@ const Sidebar = ({ onSync }) => {
   )
 }
 
-const StatRow = ({ label, count, active, onClick, color = 'text-gray-500' }) => (
+const StatusPill = ({ icon, label, count, active, onClick }) => (
   <button
     onClick={onClick}
-    className={`w-full flex items-center justify-between px-2 py-1.5 rounded text-sm transition-colors ${
-      active ? 'bg-blue-50 text-[#0077B6] font-medium' : 'hover:bg-gray-50 text-gray-700'
+    className={`flex-1 flex items-center justify-center gap-1.5 px-3 py-2 rounded-full text-xs transition-colors ${
+      active
+        ? 'bg-[#0077B6] text-white'
+        : 'bg-blue-50 text-[#0077B6] hover:bg-blue-100'
     }`}
   >
-    <span>{label}</span>
-    <span className={`text-xs ${active ? 'text-[#0077B6]' : color}`}>{count}</span>
+    {icon}
+    <span className="whitespace-nowrap">{label}</span>
+    <span className={active ? 'text-white/70' : 'text-[#0077B6]/60'}>{count}</span>
   </button>
 )
 
