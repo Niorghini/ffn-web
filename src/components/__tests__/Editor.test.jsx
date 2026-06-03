@@ -21,7 +21,7 @@ describe('Editor', () => {
   it('新建模式：渲染空 textarea + Ctrl+Enter 触发 create', async () => {
     const onSaved = vi.fn()
     render(<Editor note={null} onSaved={onSaved} />)
-    const textarea = screen.getByPlaceholderText(/写下你的想法/)
+    const textarea = screen.getByPlaceholderText(/记录想法/)
     const user = userEvent.setup()
     await user.type(textarea, 'hello #work')
     await user.keyboard('{Control>}{Enter}{/Control}')
@@ -69,5 +69,36 @@ describe('Editor', () => {
     render(<Editor note={note} />)
     expect(screen.getByText('#foo')).toBeInTheDocument()
     expect(screen.getByText('#bar')).toBeInTheDocument()
+  })
+
+  it('新建模式：实时显示字数', async () => {
+    render(<Editor note={null} onSaved={vi.fn()} />)
+    expect(screen.getByText('0 字')).toBeInTheDocument()
+    const textarea = screen.getByPlaceholderText(/记录想法/)
+    const user = userEvent.setup()
+    await user.type(textarea, '你好')
+    expect(screen.getByText('2 字')).toBeInTheDocument()
+  })
+
+  it('发送按钮：空内容 disabled，有内容 enabled', async () => {
+    render(<Editor note={null} onSaved={vi.fn()} />)
+    const sendBtn = screen.getByRole('button', { name: /发送/ })
+    expect(sendBtn).toBeDisabled()
+    const textarea = screen.getByPlaceholderText(/记录想法/)
+    const user = userEvent.setup()
+    await user.type(textarea, 'hi')
+    expect(sendBtn).not.toBeDisabled()
+  })
+
+  it('发送按钮：点一下也触发 create', async () => {
+    const onSaved = vi.fn()
+    render(<Editor note={null} onSaved={onSaved} />)
+    const textarea = screen.getByPlaceholderText(/记录想法/)
+    const user = userEvent.setup()
+    await user.type(textarea, 'click send')
+    await user.click(screen.getByRole('button', { name: /发送/ }))
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    const all = await db.notes.toArray()
+    expect(all[0].content).toBe('click send')
   })
 })

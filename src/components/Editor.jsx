@@ -1,22 +1,25 @@
 /**
- * Editor —— v0.7.0 风格单列编辑器
+ * Editor —— 圆角描边卡片 + focus 蓝边 + 实时字数 + 发送按钮
  * - 位于左栏顶部
- * - 新建：placeholder 提示 + Ctrl+Enter 提交
+ * - 新建：placeholder 提示 + Ctrl+Enter / 点发送按钮提交
  * - 编辑：300ms debounce 自动保存 + 小状态提示
  * - 标签识别 + chip 预览
  */
 import { useEffect, useRef, useState } from 'react'
+import { Send } from 'lucide-react'
 import { notesRepo } from '@/repositories/notesRepo'
 import { tagsRepo } from '@/repositories/tagsRepo'
 import { extractTagNames } from '@/lib/tags'
 
 const DEBOUNCE_MS = 300
+const MAX_CHARS = 10000 // PRD 3.2.1：content 最大 10000 字符
 
 const Editor = ({ note, onSaved, onCancel }) => {
   const [content, setContent] = useState(note?.content ?? '')
   const [tags, setTags] = useState([])
   const [saving, setSaving] = useState(false)
   const [savedAt, setSavedAt] = useState(null)
+  const [focused, setFocused] = useState(false)
   const debounceRef = useRef(null)
 
   useEffect(() => {
@@ -50,7 +53,8 @@ const Editor = ({ note, onSaved, onCancel }) => {
   }
 
   const handleSubmit = async () => {
-    if (!content.trim()) return
+    const trimmed = content.trim()
+    if (!trimmed) return
     const tagRecords = await tagsRepo.findOrCreate(extractTagNames(content))
     await notesRepo.create({ content, tagIds: tagRecords.map((t) => t.id) })
     setContent('')
@@ -64,29 +68,43 @@ const Editor = ({ note, onSaved, onCancel }) => {
     }
   }
 
+  const charCount = content.length
+  const canSend = !note && content.trim().length > 0 && charCount <= MAX_CHARS
+  const overLimit = charCount > MAX_CHARS
+
+  // 编辑模式：底部状态行
   const statusLine = note
     ? saving
       ? '保存中...'
       : savedAt
       ? `已保存 ${formatTime(savedAt)}`
       : ''
-    : content
-    ? 'Ctrl+Enter 提交'
     : ''
 
   return (
-    <section className="bg-white rounded-lg shadow-sm p-4">
+    <section
+      className={`bg-white rounded-lg border transition-colors p-4 ${
+        focused ? 'border-[#0077B6] shadow-sm' : 'border-gray-200'
+      } ${overLimit ? 'border-red-500' : ''}`}
+    >
       <textarea
         value={content}
         onChange={handleChange}
         onKeyDown={handleKeyDown}
-        placeholder={note ? '编辑内容...' : '写下你的想法...（Ctrl+Enter 提交）'}
-        className="w-full resize-none outline-none text-base leading-relaxed placeholder:text-[#9ba1a6] focus:ring-0 border-0"
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
+        placeholder={
+          note
+            ? '编辑内容...'
+            : '记录想法... （#标签 格式添加标签，Ctrl+Enter 发送）'
+        }
+        maxLength={note ? undefined : MAX_CHARS}
+        className="w-full resize-none outline-none text-base leading-relaxed placeholder:text-[#9ba1a6] focus:ring-0 border-0 bg-transparent"
         rows={4}
         autoFocus={!note}
       />
-      <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-100">
-        <div className="flex flex-wrap gap-1 min-h-[20px]">
+      <div className="flex items-center justify-between mt-2 pt-2 border-t border-gray-100 gap-2">
+        <div className="flex flex-wrap gap-1 min-h-[20px] flex-1 min-w-0">
           {tags.map((t) => (
             <span
               key={t}
@@ -96,15 +114,28 @@ const Editor = ({ note, onSaved, onCancel }) => {
             </span>
           ))}
         </div>
-        <div className="flex items-center gap-2 text-[10px] text-gray-400">
-          {statusLine}
-          {!note && content.trim() && (
-            <button
-              onClick={handleSubmit}
-              className="ml-2 px-2 py-0.5 text-xs bg-[#0077B6] text-white rounded hover:bg-[#005f8c] transition-colors"
-            >
-              提交
-            </button>
+        <div className="flex items-center gap-3 shrink-0">
+          {note && statusLine && (
+            <span className="text-[10px] text-gray-400">{statusLine}</span>
+          )}
+          {!note && (
+            <>
+              <span
+                className={`text-xs tabular-nums ${
+                  overLimit ? 'text-red-500' : 'text-gray-400'
+                }`}
+              >
+                {charCount} 字
+              </span>
+              <button
+                onClick={handleSubmit}
+                disabled={!canSend}
+                className="flex items-center gap-1 px-3 py-1.5 bg-[#0077B6] text-white text-sm rounded-md hover:bg-[#005f8c] disabled:bg-gray-200 disabled:text-gray-400 disabled:cursor-not-allowed transition-colors"
+              >
+                <Send size={14} />
+                发送
+              </button>
+            </>
           )}
         </div>
       </div>
